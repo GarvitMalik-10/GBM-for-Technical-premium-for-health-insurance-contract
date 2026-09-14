@@ -1,0 +1,1075 @@
+---
+title: "Assignment Data Science for Non-Life Insurance"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+We introduce the libraries:
+
+```{r}
+library(tidyverse)
+library(skimr)
+library(readxl)
+library(corrplot)
+library(psych)
+```
+
+(if you don't have the package install it with install.packages("name of package"))
+
+We start by setting the working directory:
+
+Then we can finally import the data:
+
+```{r}
+data=read_excel('insuranceportfolio.xlsx')
+```
+
+We start by explaining and defining the various variables: -frequency: n_medical_services which is the total number of medical services for the insured policy during the current year -severity: cost_claims_year which is the cost of the events (I suppose that for finding severity we have to severity=cost_claims_year/n_medical_services) -covariates: data about the insured(age, gender), data about the policy(type_policy, type_product, premium, distribution_channel, reimbursement) and geographical data like C_H, C_GI and C_C
+
+We start by converting to numbers the qualitative data with as.factor:
+
+```{r}
+colnames(data)
+dataclean=data %>%
+  mutate(
+    gender=as.factor(gender),
+    type_policy=as.factor(type_policy),
+    type_product=as.factor(type_product),
+    type_policy_dg=as.factor(type_policy_dg),
+    reimbursement=as.factor(reimbursement),
+    new_business=as.factor(new_business),
+    distribution_channel=as.factor(distribution_channel),
+    lapse=as.factor(lapse),
+    C_H=as.factor(C_H),
+    C_C=as.factor(C_C),
+    severity=ifelse(n_medical_services>0, cost_claims_year/n_medical_services, NA)
+    
+  )
+
+dataclaims=dataclean[which(dataclean$n_medical_services>0),]
+```
+
+Now all the data are numeric, so we will be able to conduct our analysis.
+
+```{r}
+summary(dataclean)
+```
+
+```{r}
+ggplot(dataclean, aes(x=n_medical_services)) +
+  geom_histogram(binwidth=1, fill='steelblue', color='white') +
+  theme_minimal() +
+  coord_cartesian(xlim=c(0, 50))+ 
+  labs(title = 'Distribution of frequency (Zoom 0-50)', x='Number of services', y='Count')
+ggplot(dataclaims, aes(x=severity))+
+         geom_histogram(bins=50, fill='darkorange', color='white')+scale_x_log10()+theme_minimal()+labs(title='Distribution of severity', x='Severity', y='Frequency')
+```
+
+The two of them follow a distribution which really looks normal.
+
+```{r}
+datanumeric=dataclean[,sapply(dataclean, is.numeric)]
+correlation=cor(datanumeric, use='pairwise.complete.obs')
+corrplot(correlation,  tl.col='black',title='Correlation Plot')
+```
+
+We can see how the majority of the variables are not correlated between each other, in addition we can see that the variables about the categories in which population has been splitted are mostly negative.
+
+We try to plot the histogram to check the distribution:
+
+```{r}
+dataclean %>%
+  select(where(is.numeric)) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%
+  drop_na(value) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  facet_wrap(~ variable, scales = "free") + 
+  theme_minimal() +
+  labs(title = "Distribution of numerical variables", x = "", y = "Count")
+```
+
+(obviously it is not useful to look at all these histograms an example are the dates one)
+
+We now use ggplot for the type of product in order to study the distribution based on the type of product:
+
+```{r}
+ggplot(dataclean %>% drop_na(type_product), aes(x=type_product, fill=type_product))+
+  geom_bar(color='black', alpha=0.8)+
+  theme_minimal()+
+  labs(title='Distribution for type of product', x='Product', y='Number of insured')+
+  theme(legend.position='none')
+```
+
+We study the mean and variances of the events:
+
+```{r}
+meanfreq=mean(dataclean$n_medical_services, na.rm=TRUE)
+varfreq=var(dataclean$n_medical_services, na.rm=TRUE)
+print(meanfreq)
+print(varfreq)
+```
+
+Since variance is way bigger than mean we can't use poisson but we have to use the negative binomial.
+
+We can now study the geographic:
+
+```{r}
+ggplot(dataclaims %>% drop_na(C_C), aes(x=C_C, y=severity, fill=C_C))+geom_boxplot(alpha=0.7)+scale_y_log10()+theme_minimal()+labs(title='Severity for climatic area', x='Climatic cluster', y='Cost for event')
+```
+
+We now try to do a multivariate analysis to see how covariates are connected/correlated:
+
+```{r}
+dataagegender=dataclean %>%
+  group_by(age, gender) %>%
+  summarise(
+    exposure = sum(exposure_time, na.rm = TRUE),
+    claims = sum(n_medical_services, na.rm = TRUE),
+    frequency = claims / exposure,
+    .groups = "drop"
+  ) %>%
+  filter(exposure > 10) %>% drop_na(gender)
+  ggplot(dataagegender, aes(x=age, y=frequency, color=gender))+ geom_smooth(method='loess', se=FALSE, size=1.2)+
+  theme_minimal()+labs(title='Frequency of events: age vs gender', x='Age', y='Frequency')
+```
+
+Younger females seem to have higher frequency, then as they get older males start to get higher frequency.
+
+We study the risk premium:
+
+```{r}
+datapurepremium=dataclean %>%
+  drop_na(type_product) %>%
+  group_by(type_product) %>%
+  summarise(
+    exposure = sum(exposure_time, na.rm = TRUE),
+    totcost = sum(cost_claims_year, na.rm = TRUE),
+    pureprem = totcost / exposure,
+    .groups = "drop"
+  ) 
+  ggplot(datapurepremium, aes(x=type_product, y=pureprem, fill=type_product))+ geom_col(color='black', alpha=0.8)+
+  theme_minimal()+labs(title='Pure premium', x='Type product', y='Pure premium')
+```
+
+We study the large claims:
+
+```{r}
+severitypercentile=quantile(dataclaims$severity, probs=c(0.5, 0.75, 0.9, 0.95, 0.99 ), na.rm=TRUE)
+print(severitypercentile)
+```
+
+Now we check if there is a connection between the number of incidents and the geographical area:
+
+```{r}
+datageograp=dataclean %>%
+  group_by(C_C) %>%
+  summarise(
+    exposure=sum(exposure_time, na.rm=TRUE),
+    claims=sum(n_medical_services, na.rm=TRUE), 
+    frequency=claims/exposure,
+    .groups='drop'
+  ) %>%
+  drop_na(C_C)
+
+ggplot(datageograp, aes(x=reorder(C_C, -frequency), y=frequency, fill=C_C))+
+  geom_col(color='black', alpha=0.8)+
+  theme_minimal()+
+  labs(
+    title='Frequency of claims per geographical area', 
+    x='Geographical area',
+    y='Frequency'
+  )+
+  theme(legend.position='none')
+```
+
+We can see that the geographical area with the highest frequency is C2 then we have C3, C6, C1, C5 and C4, so C4 is the lowest one. Now we can ask ourselves if there is a kind of connection between the frequency of claims in certain geographical areas and the characteristics of these areas like: temperature, uv index, altitude and pressure. First by looking at the map which was present on the file we can maybe assume that the geographical areas are divided as follow: -C1: central plateu(Meseta Central) close to Madrid-\>very continental Mediterranean temperature with cold winter and very hot summers -C2: Canary Islands-\> it is a volcaninc archipelago in the Atlantic Ocean with subtropical climate and mountainous terrain -C3: mediterranean coast and southern strip-\>warm mediterranean climate with hot summers and mild winters -C4: central and northern plateu-\>with harsh continental climate with seasonal and daily temperature ranges. It is also crossed by several mountains. -C5: Eastern inland and southern areas-\>transitional zone-\>both with mediterranean and mountain zones -\>has a mix of continental and mediterranean climatic influences -C6: north and west coast-\>oceaninc climate with abundant rainfall, high humidity and mild temperature all year-\> very mountainous zone.
+
+We now introduce the dataset with the temperature characteristics:
+
+```{r}
+dataclimate=read_excel('Centroid values of the climate clusters.xlsx')
+```
+
+We now merge the two dataset but before we do a fast analysis of the new one:
+
+```{r}
+summary(dataclimate)
+```
+
+```{r}
+dataclean=dataclean %>%
+  left_join(dataclimate, by=c('C_C'='C_C', 'period'='Year'))
+dataclean=dataclean %>% 
+  rename(
+    Pressure='Armospheric Pressure',
+    UV_index='UV index'
+  )
+glimpse(dataclean)
+```
+
+We now plot the graphs:
+
+```{r}
+dataclimateanalysis=dataclean %>%
+  group_by(C_C) %>%
+  summarise(
+    exposure=sum(exposure_time, na.rm=TRUE),
+    claims=sum(n_medical_services, na.rm=TRUE),
+    frequency=claims/exposure,
+    meanpressure=mean(Pressure, na.rm=TRUE),
+    meantemp=mean(Temperature, na.rm=TRUE),
+    meanuv=mean(UV_index, na.rm=TRUE),
+    meanprecipitation=mean(Precipitation, na.rm=TRUE),
+    meanwind=mean(Wind, na.rm=TRUE),
+    .groups='drop'
+  ) %>%
+  drop_na(C_C)
+```
+
+Now we plot the ggplot:
+
+```{r}
+ggplot(dataclimateanalysis, aes(x=meanpressure, y=frequency, label=C_C))+ geom_point(color='darkblue', size=4)+
+  geom_smooth(method='lm', se=FALSE, color='red', linetype='dashed')+
+  geom_text(vjust=-1.5)+
+  theme_minimal()+labs(
+    title='Impact of atmopspheric pressure on frequency',subtitle='Lower pressure implies higher altitude',
+    x='Mean atmospheric pressure',
+    y='Frequency'
+  )
+```
+
+We can see that as the pressure increases also the frequency does. It is important to notice that high pressure zones are also the most flat/close to the level of the sea one. On the other hand with low pressure we have zones rich of mountains just like Pyrenees.
+
+Now we conduct a similar analysis but not only looking at the relationship of pressure and frequency but also others variables. We can start with precipitation:
+
+```{r}
+ggplot(dataclimateanalysis, aes(x=meanprecipitation, y=frequency, label=C_C))+ geom_point(color='darkblue', size=4)+
+  geom_smooth(method='lm', se=FALSE, color='red', linetype='dashed')+
+  geom_text(vjust=-1.5)+
+  theme_minimal()+labs(
+    title='Impact of precipitation on frequency',
+    x='Mean precipitation',
+    y='Frequency'
+  )
+```
+
+We can see that the frequency and precipitation are not proportional indeed as in general the frequency increases the mean of precipitation decreases. This implies that we have an higher frequency in zone were it rains/snow less. An exception for this are C6 and C4. We tried to look for a reason behind this phenomena and it might be because C6 is more densely inhabited, on the other side the frequency of C4 might be so low because it is not densely inhabited probably because of the mountains.
+
+Now we can study the connection with temperature:
+
+```{r}
+ggplot(dataclimateanalysis, aes(x=meantemp, y=frequency, label=C_C))+ geom_point(color='darkblue', size=4)+
+  geom_smooth(method='lm', se=FALSE, color='red', linetype='dashed')+
+  geom_text(vjust=-1.5)+
+  theme_minimal()+labs(
+    title='Impact of temperature on frequency',
+    x='Meatemperature',
+    y='Frequency'
+  )
+```
+
+We can see that as the temperature increases also the number of claims increases with it so we have a quite of linear behavior in this case.
+
+Now we study if UV index is affecting our dataset or the number of claims:
+
+```{r}
+ggplot(dataclimateanalysis, aes(x=meanuv, y=frequency, label=C_C))+ geom_point(color='darkblue', size=4)+
+  geom_smooth(method='lm', se=FALSE, color='red', linetype='dashed')+
+  geom_text(vjust=-1.5)+
+  theme_minimal()+labs(
+    title='Impact of uv index on frequency',
+    x='Mean uv index',
+    y='Frequency'
+  )
+```
+
+In this case it does seems like the UV index does not really affect the number of claims that we get.
+
+We do the same with wind:
+
+```{r}
+ggplot(dataclimateanalysis, aes(x=meanwind, y=frequency, label=C_C))+ geom_point(color='darkblue', size=4)+
+  geom_smooth(method='lm', se=FALSE, color='red', linetype='dashed')+
+  geom_text(vjust=-1.5)+
+  theme_minimal()+labs(
+    title='Impact of wind on frequency',
+    x='Mean wind',
+    y='Frequency'
+  )
+```
+
+On the other hand weirdly we can see that in general for wind and frequency increases together, this is kind of weird but maybe it is a factor that depends more on the geographical area.
+
+It's quite important to notice that in general the most densely populated zones are : C1, C3, C6, C2, in the meanwhile the least populated ones are: C5 and C4. This happens because C4 is full of mountains like Pyrenees, Iberical Mountains, in the meanwhile in C5 we can find desert like Taberna, so it is obvious that it is not easy to live there. Since in general old people tends to move to costal zones in these areas more people get to the hospital, in addition compared to the desertic zones or also the mountainous one, in these hospitals are easier to reach. In addition it is also extremely important to notice that the zones with the highest frequency are also the most urbanized/industrialized one.
+
+```{r}
+ggplot(dataclean, aes(x=exposure_time)) +
+  geom_histogram(bins=30, fill='forestgreen', color='white') +
+  theme_minimal() +
+  labs(title = 'Distribution of Exposure Time', x='Exposure Time (Years)', y='Count')
+```
+
+We now plot Spain maps, but before let's import the libraries:
+
+```{r}
+library(sf)
+library(mapSpain)
+library(dplyr)
+library(ggplot2)
+```
+
+Now we can write the function to be able to plot the map:
+
+```{r}
+
+datageograp=dataclean %>%
+  group_by(C_C) %>%
+  summarise(
+    exposure=sum(exposure_time, na.rm = TRUE),
+    claims=sum(n_medical_services, na.rm = TRUE), 
+    frequency = claims / exposure,
+    .groups='drop'
+  ) %>%
+  drop_na(C_C)
+
+
+spain_ccaa=esp_get_ccaa()
+
+cluster_mapping=data.frame(
+  ine.ccaa.name = c("Andalucía", "Aragón", "Principado de Asturias", "Illes Balears", 
+                    "Canarias", "Cantabria", "Castilla y León", "Castilla-La Mancha", 
+                    "Cataluña", "Comunitat Valenciana", "Extremadura", "Galicia", 
+                    "Comunidad de Madrid", "Región de Murcia", "Comunidad Foral de Navarra", 
+                    "País Vasco", "La Rioja", "Ceuta", "Melilla"),
+  C_C = c("C3", "C4", "C6", "C3", 
+          "C2", "C6", "C4", "C1", 
+          "C5", "C3", "C1", "C6", 
+          "C1", "C3", "C4", 
+          "C6", "C4", "C3", "C3") 
+)
+
+
+spain_map_freq=spain_ccaa %>%
+  left_join(cluster_mapping, by="ine.ccaa.name") %>%
+  left_join(datageograp, by="C_C")
+
+
+ggplot(spain_map_freq) +
+  geom_sf(aes(fill=frequency), color = "white", size = 0.3) +
+ 
+  scale_fill_distiller(palette = "Reds", direction = 1, na.value="gray80") +
+  theme_minimal() +
+  labs(title="Maps of frequency for area",
+       subtitle="Darkest colors implies a bigger usage of medical services",
+       fill="mean frequency") +
+  theme(panel.grid=element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank())
+```
+
+CAVEAT 1:some areas are in gray because some of the clients were missing the geographical classification C_C , so those policies were not considered(for example they had NaN)
+
+CAVEAT 2: We are considering this kind of map because the one given by the dataset is not present in R, still even with this one we are able to spot which are the most populated regions.
+
+# Modelling the claim frequency
+
+Now we focus on modelling the **frequency** of claims.\
+As highlighted in the exploratory data analysis, the target variable is `n_medical_services` (number of claims per policy), and the exposure is `exposure_time` (measured in years).
+
+Since the variance of `n_medical_services` is much larger than its mean (overdispersion), a standard Poisson model would be inappropriate as anticipated before. For this reason we decided to adopt two different modelling techniques:
+
+1.  **Negative Binomial GLM** – extends the Poisson model by adding a dispersion parameter to handle overdispersion.\
+2.  **Gradient Boosting Machine (GBM)** with Poisson loss and offset – a non‑parametric tree‑based method that can capture non‑linear effects and interactions.
+
+We will train the models on 80% of the data and evaluate them on the remaining 20% using appropriate metrics (MAE, RMSE, calibration plots).\
+
+First of all we need to divide our dataset in training data and testing data:
+
+```{r}
+
+df_mod <- dataclean %>%
+  filter(!is.na(exposure_time), exposure_time > 0,
+         !is.na(age), !is.na(gender), !is.na(type_product), !is.na(C_C)) %>%
+  mutate(Claims   = n_medical_services,
+         Exposure = exposure_time)
+
+set.seed(123)
+n         <- nrow(df_mod)
+train_idx <- sample(seq_len(n), size = floor(0.8 * n))
+train     <- df_mod[ train_idx, ]
+test      <- df_mod[-train_idx, ]
+```
+
+## Proof of non-suitability of the Poisson model
+
+Before going to the two models proposed above we need to give a proof that the Poisson one is not suitable for our case. Our goal is to estimate the rate $\lambda$ that is defined as:
+$$\lambda = \frac{\mathbb{E}[\text{Claims}]}{\text{Exposure}}$$ 
+In reality we want to use the logarithm of it (to not have negative values) so it becomes:
+
+$$\log(\lambda) = \beta_0 + \beta_1 x_1 + \dots $$ 
+
+From this we obtain:
+
+$$ \log(\mathbb{E}[\text{Claims}]) = \log(\text{Exposure}) + \beta_0 + \beta_1 x_1 + \dots $$
+We want to compare two different approaches for the Poisson model: Geographic Approach (we use C_C variable) and Climatic Approach (using phisical variable).
+We do this comparison to stay in line with the analysis done in the previous sector, as we saw that pressure and temperature are proportional to frequency while the precipitation is inverse proportional. 
+Then we compare it in order to choose the model that is more suitable for our case. 
+```{r}
+# Model 1: Geographic Approach (using C_C cluster as a proxy)
+# This model assumes that the risk is tied to the specific region.
+glm_pois_geo <- glm(Claims ~ age + gender + type_product + C_C +
+                      offset(log(Exposure)),
+                    family = poisson(link = "log"),
+                    data   = train)
+
+# Model 2: Climatic Approach (using physical sensors)
+# This model tests if the risk is driven by specific weather conditions 
+# (Temperature, Pressure, Wind) instead of just "location".
+glm_poi_clim <- glm(Claims ~ age + gender + type_product + Temperature + Pressure + Wind + 
+                      offset(log(Exposure)), 
+                   family = poisson(link = "log"),
+                      data = train)
+
+# Compare performance using AIC and Deviance
+# Lower AIC indicates a better balance between fit and complexity.
+model_comp <- data.frame(
+  Model = c("Geographic (C_C)", "Climatic (Temp/Pres/Wind)"),
+  AIC = c(AIC(glm_pois_geo), AIC(glm_poi_clim)),
+  Deviance = c(glm_pois_geo$deviance, glm_poi_clim$deviance)
+)
+
+print(model_comp)
+```
+The geographic cluster C_C captures the variance in the data better than the three specific climate sensors combined. So we continue the proof of non-suitability with that specific model. 
+```{r}
+
+
+summary(glm_pois_geo)
+
+# Fitted vs Observed (assi corretti)
+plot(glm_pois_geo$fitted.values, train$Claims,
+     xlab = "Fitted values (Poisson)",
+     ylab = "Observed claims",
+     main = "Poisson GLM: fitted vs observed",
+     pch  = 16, col = rgb(0, 0, 0, 0.1), cex = 0.5)
+abline(0, 1, col = "darkblue", lwd = 2)
+abline(lm(train$Claims ~ glm_pois_geo$fitted.values),   # <-- corretto
+       col = "steelblue", lwd = 2, lty = 2)
+
+# Overdispersion: ratio deviance / df
+disp_ratio <- deviance(glm_pois_geo) / df.residual(glm_pois_geo)
+cat("Residual deviance:", round(deviance(glm_pois_geo), 0), "\n")
+cat("Degrees of freedom:", df.residual(glm_pois_geo), "\n")
+cat("Dispersion ratio (deve essere ~1 per Poisson):", round(disp_ratio, 2), "\n")
+
+# Formal test for overdispersion (AER)
+library(AER)
+dispersiontest(glm_pois_geo)
+```
+In this model we are predicting the frequency using the geographical variable C_C 
+From the output we can see that:
+
+1.  **Residual deviance** = 4,063,217
+2.  **Degrees of freedom** = 167,817
+3.  Ratio deviance / df ≈ 24.2 (\>\> 1)
+
+This indicates **strong overdispersion** (as already observed in the previous section of descriptive analysis).\
+Therefore, the Poisson model is not appropriate.\
+We can now move on to a model that **accounts for overdispersion**, such as the **Negative Binomial**.
+
+## Negative Binomial GLM
+
+As we saw in the Poisson specification, we use the same relationship here:
+$$\log(E[\text{Claims}]) = \log(\text{Exposure}) + \beta_0 + \beta_1 x_1 + \dots$$
+So, also in the Negative Binomial specification, we want to use the offset term for the variable $\log(\text{Exposure})$.The main difference between the two models is that in the Poisson model, the variance and the mean are equal, while in the Negative Binomial model, the variance is defined as:
+$$Var[\text{Claims}] = E[\text{Claims}] + \frac{E[\text{Claims}]^2}{\theta}$$
+This allows us to look at the overdispersion (which was not possible in the Poisson model).
+
+```{r}
+# Negative Binomial model (accounts for overdispersion)
+library(MASS)
+
+glm_nb_geo <- glm.nb(Claims ~ age + gender + type_product + C_C +
+                       offset(log(Exposure)),
+                     data = train)
+
+glm_nb_clim <- glm.nb(Claims ~ age + gender + type_product +
+                        Temperature + Pressure + Wind +
+                        offset(log(Exposure)),
+                      data = train)
+
+model_comp_nb <- data.frame(
+  Model    = c("Geographic (C_C)", "Climatic (Temp/Pres/Wind)"),
+  AIC      = c(AIC(glm_nb_geo),      AIC(glm_nb_clim)),
+  Deviance = c(deviance(glm_nb_geo), deviance(glm_nb_clim))
+)
+print(model_comp_nb)
+```
+Also in this case the C_C variable is preferred. 
+```{r}
+summary(glm_nb_geo)
+
+# Fitted vs Observed
+plot(glm_nb_geo$fitted.values, train$Claims,
+     xlab = "Fitted values (Negative Binomial)",
+     ylab = "Observed claims",
+     main = "Negative Binomial GLM: fitted vs observed",
+     pch  = 16, col = rgb(0, 0, 0, 0.1), cex = 0.5)
+abline(0, 1, col = "darkblue", lwd = 2)
+abline(lm(train$Claims ~ glm_nb_geo$fitted.values),
+       col = "steelblue", lwd = 2, lty = 2)
+
+
+pearson_res <- residuals(glm_nb_geo, type = "pearson")
+hist(pearson_res, breaks = 60, col = "steelblue", border = "white",
+     main = "Pearson residuals — Negative Binomial",
+     xlab = "Pearson residual")
+
+# Dispersion ratio (deve essere ~1)
+disp_nb <- deviance(glm_nb_geo) / df.residual(glm_nb_geo)
+cat("Theta (dispersion parameter):", round(glm_nb_geo$theta, 4), "\n")
+cat("Residual deviance:", round(deviance(glm_nb_geo), 0), "\n")
+cat("Degrees of freedom:", df.residual(glm_nb_geo), "\n")
+cat("Dispersion ratio:", round(disp_nb, 3), "\n")
+```
+
+
+
+The output shows:
+
+- **Theta** = 0.483 (significantly different from infinity, which would correspond to Poisson).\
+- **Residual deviance** = 186,440 on 167,817 df → ratio ≈ 1.11, close to 1, indicating a good fit.\
+- **AIC** is not directly comparable with Poisson because of different likelihoods, but the dramatic drop in deviance confirms that the Negative Binomial is far more appropriate.
+
+All covariates remain statistically significant, with standard errors larger than in the Poisson model (as expected).
+
+### Model evaluation on the test set
+
+We compute predictions on the test set and evaluate the Negative Binomial model using MAE, RMSE, and a calibration plot.
+
+```{r}
+pred_nb <- predict(glm_nb_geo, newdata = test, type = "response")
+
+
+mae_nb  <- mean(abs(test$Claims - pred_nb))
+rmse_nb <- sqrt(mean((test$Claims - pred_nb)^2))
+
+
+dev_nb <- 2 * sum(
+  ifelse(test$Claims > 0,
+         test$Claims * log(test$Claims / pred_nb),
+         0) - (test$Claims - pred_nb)
+)
+
+cat("Negative Binomial — test set:\n")
+cat("  MAE:      ", round(mae_nb,  4), "\n")
+cat("  RMSE:     ", round(rmse_nb, 4), "\n")
+cat("  Deviance: ", round(dev_nb,  0), "\n")
+```
+
+```{r}
+
+calib_nb <- test %>%
+  mutate(pred   = pred_nb,
+         decile = ntile(pred, 10)) %>%
+  group_by(decile) %>%
+  summarise(
+    observed = sum(Claims),
+    expected = sum(pred),
+    exposure = sum(Exposure),
+    .groups  = "drop"
+  ) %>%
+  mutate(obs_rate = observed / exposure,
+         exp_rate = expected / exposure)
+
+lim_nb <- range(c(calib_nb$obs_rate, calib_nb$exp_rate))
+
+ggplot(calib_nb, aes(x = exp_rate, y = obs_rate)) +
+  geom_abline(linetype = "dashed", color = "red", linewidth = 1) +
+  geom_point(size = 3, color = "darkblue") +
+  coord_fixed(xlim = lim_nb, ylim = lim_nb) +
+  theme_minimal() +
+  labs(title    = "Calibration plot — Negative Binomial",
+       subtitle = "Points on the dashed line = perfect calibration",
+       x        = "Predicted annual claim rate",
+       y        = "Observed annual claim rate")
+```
+
+From the output, the MAE is 16.16. This means the model predicts the average number of claims quite well, but with high variability. The RMSE is higher (26.38), so predictions for policies with many claims are less accurate. The deviance is 1,024,154. The calibration plot shows that most points are close to the diagonal line, which means the model is well calibrated.
+
+## Gradient Boosting Machine (GBM)
+
+The big difference in the GBM in comparison with the GLM is that this is a non-parametric method and so it is not based only on the linear regression with $\beta$.
+
+The function that we obtain, it will be more complex and we define it as $F(x)$. So our final formula in this case will be:
+
+$$ log8E[Claims])=log(Exposure)+F(x_1,x_2,...)$$ We can notice that we have always the offset term (but we describe better our algorithm below).
+
+```{r}
+
+library(gbm)
+train$logExposure <- log(train$Exposure)
+test$logExposure  <- log(test$Exposure)
+train$C_C <- as.factor(train$C_C)
+test$C_C <- as.factor(test$C_C)
+set.seed(123)
+gbm_train <- gbm(Claims ~ age + gender + type_product + C_C + 
+                offset(logExposure),
+                data = train,
+                distribution = "poisson",
+                n.trees = 1000,
+                shrinkage = 0.01,
+                interaction.depth = 3,
+                bag.fraction = 0.5,
+                train.fraction = 0.5,       
+                n.minobsinnode = 10000,
+                cv.folds = 3,
+                keep.data = TRUE,
+                verbose = FALSE,
+                n.cores = 1)
+
+best.iter <- gbm.perf(gbm_train, method = "cv")
+print(paste("Best number of trees:", best.iter))
+
+summary(gbm_train, n.trees = best.iter)
+
+```
+
+We fit a Gradient Boosting Machine with Poisson loss, using the same covariates as the Negative Binomial model and an offset for exposure.\
+Key parameters: `n.trees = 1000`shrinkage = 0.01`,`interaction.depth =3`,`train.fraction = 0.5`,`n.minobsinnode = 10000\`.\
+The optimal number of trees identified via 3-fold cross-validation was 997. This confirms that our initial parameter of n.trees = 1000 is highly appropriate, capturing nearly all the predictive power without the need for additional, computationally expensive iterations.
+
+```{r}
+# here we add manually test$Exposure because the first output was giving a warning that was adding the offset predicted values
+pred_gbm <- predict(gbm_train, newdata = test, n.trees = best.iter, type = "response") * test$Exposure
+
+# Metrics
+mae_gbm <- mean(abs(test$Claims - pred_gbm))
+rmse_gbm <- sqrt(mean((test$Claims - pred_gbm)^2))
+
+cat("GBM on test set:\n")
+cat("MAE:", mae_gbm, "\n")
+cat("RMSE:", rmse_gbm, "\n")
+
+
+dev_gbm <- sum(2 * (test$Claims * log(pmax(test$Claims,1)/pred_gbm) - (test$Claims - pred_gbm)))
+cat("Deviance:", dev_gbm, "\n")
+
+```
+
+```{r}
+calib_df_gbm <- test %>%
+  mutate(pred = pred_gbm,          
+         decile = ntile(pred, 10))
+
+calibration_gbm <- calib_df_gbm %>%
+  group_by(decile) %>%
+  summarise(
+    observed = sum(Claims),
+    expected = sum(pred),
+    exposure = sum(Exposure),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    obs_rate = observed / exposure,
+    exp_rate = expected / exposure
+  )
+
+# Plot per GBM
+ggplot(calibration_gbm, aes(x = exp_rate, y = obs_rate)) +
+  geom_point(size = 3, color = "darkgreen") +   
+  geom_abline(linetype = "dashed", color = "red", linewidth = 1) +
+  labs(
+    title = "GBM Model - calibration",
+    x = "annual rate of claims (predicted)",
+    y = "annual rate of claims (observed)"
+  ) +
+  theme_minimal() +
+  coord_fixed() +
+  xlim(0, max(calibration_gbm$obs_rate, calibration_gbm$exp_rate)) +
+  ylim(0, max(calibration_gbm$obs_rate, calibration_gbm$exp_rate))
+```
+
+Now that we constructed the two models for the frequency, we can put in comparison the metrics of boths. Below there is a Model Comparison Table:
+
+| Metrics  | Negative Binomial | GBM      |
+|----------|-------------------|----------|
+| MAE      | 16.1646           | 16.61696 |
+| RMSE     | 26.37752          | 26.5938  |
+| DEVIANCE | 1024154           | 1085657  |
+
+The Negative Binomial has better performances on the three metrics that we studied. So, for the frequency, the linear model with Negative Binomial Distribution is preferred.
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(gbm)
+```
+
+(if you don't have the package install it with install.packages("name of package"))
+
+We now define the utility functions that we will use for the severity models, together with the path of the dataset. Since this file can also be appended later to the main assignment, we look for the Excel file in both possible locations.
+
+```{r}
+options(stringsAsFactors = FALSE)
+
+mae <- function(y, p) mean(abs(y - p), na.rm = TRUE)
+rmse <- function(y, p) sqrt(mean((y - p)^2, na.rm = TRUE))
+
+calibration_table <- function(actual, pred, model_name, n_groups = 10) {
+  data.frame(actual = actual, pred = pred) %>%
+    mutate(decile = ntile(pred, n_groups)) %>%
+    group_by(decile) %>%
+    summarise(
+      n = n(),
+      avg_actual = mean(actual, na.rm = TRUE),
+      avg_pred = mean(pred, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(model = model_name) %>%
+    select(model, everything())
+}
+
+align_factor_levels <- function(train_df, test_df, columns) {
+  for (col_nm in columns) {
+    if (is.factor(train_df[[col_nm]])) {
+      train_df[[col_nm]] <- droplevels(train_df[[col_nm]])
+      test_df[[col_nm]] <- factor(test_df[[col_nm]], levels = levels(train_df[[col_nm]]))
+    }
+  }
+
+  list(train = train_df, test = test_df)
+}
+
+fit_gbm_model <- function(train_df, predictors, target_name) {
+  train_log <- train_df
+  train_log$log_target <- log(train_log[[target_name]])
+
+  gbm_formula <- as.formula(
+    paste("log_target ~", paste(predictors, collapse = " + "))
+  )
+
+  model <- gbm(
+    formula = gbm_formula,
+    data = train_log,
+    distribution = "gaussian",
+    n.trees = 3000,
+    interaction.depth = 3,
+    shrinkage = 0.01,
+    n.minobsinnode = 100,
+    bag.fraction = 0.7,
+    cv.folds = 5,
+    train.fraction = 1.0,
+    verbose = FALSE
+  )
+
+  best_iter <- gbm.perf(model, method = "cv", plot.it = FALSE)
+  train_pred_log <- predict(model, newdata = train_log, n.trees = best_iter, type = "response")
+  smearing_factor <- mean(exp(train_log$log_target - train_pred_log), na.rm = TRUE)
+
+  list(
+    model = model,
+    best_iter = best_iter,
+    distribution_used = "gaussian_on_log_severity",
+    smearing_factor = smearing_factor,
+    prediction_fun = function(new_df) {
+      pred_log <- predict(model, newdata = new_df, n.trees = best_iter, type = "response")
+      pmax(exp(pred_log) * smearing_factor, .Machine$double.eps)
+    }
+  )
+}
+
+data_candidates <- c(
+  file.path("insuranceportfolio.xlsx"),
+  file.path("insuranceportfolio.xlsx")
+)
+
+DATA_FILE <- data_candidates[file.exists(data_candidates)][1]
+
+if (is.na(DATA_FILE)) {
+  stop("The Excel dataset was not found.")
+}
+```
+
+# Modelling the claim severity
+
+Now we focus on modelling the **severity** of claims.\
+In this case the target variable is:
+
+$$\text{severity} = \frac{\text{cost\_claims\_year}}{\text{n\_medical\_services}}$$
+
+So, differently from the frequency model, here we are not modelling the number of events but the average cost per service. Since severity is defined only when there is at least one claim, we keep only the observations with positive claims and positive severity.
+
+We now import the data and prepare the variables:
+
+```{r}
+df <- read_excel(DATA_FILE)
+df <- as.data.frame(df)
+
+df <- df %>%
+  mutate(
+    lapse = as.factor(lapse),
+    type_policy = as.factor(type_policy),
+    type_policy_dg = as.factor(type_policy_dg),
+    type_product = as.factor(type_product),
+    reimbursement = as.factor(reimbursement),
+    new_business = as.factor(new_business),
+    distribution_channel = as.factor(distribution_channel),
+    gender = as.factor(gender),
+    C_H = as.factor(C_H),
+    C_GI = as.factor(C_GI),
+    C_C = as.factor(C_C),
+    severity = ifelse(n_medical_services > 0, cost_claims_year / n_medical_services, NA_real_)
+  )
+
+df_sev <- df %>%
+  filter(severity > 0, n_medical_services > 0)
+```
+
+We use a time-based split because it is more realistic for insurance applications: we train the models on 2017 and 2018, then we evaluate them on 2019.
+
+```{r}
+train <- df_sev %>%
+  filter(period %in% c(2017, 2018))
+
+test <- df_sev %>%
+  filter(period == 2019)
+```
+
+We first plot the distribution of severity:
+
+```{r}
+ggplot(df_sev, aes(x = severity)) +
+  geom_histogram(bins = 50, fill = "darkorange", color = "white") +
+  scale_x_log10() +
+  theme_minimal() +
+  labs(title = "Distribution of severity", x = "Severity", y = "Frequency")
+```
+
+The distribution is strictly positive and strongly right-skewed, so two natural candidates are a **Gamma GLM with log link** and a **GBM on log(severity)**.
+
+We now choose the predictors exactly as in the pipeline and we remove the variables that are all missing or constant in the training set.
+
+```{r}
+preferred_predictors <- c(
+  "age",
+  "gender",
+  "type_policy",
+  "type_policy_dg",
+  "type_product",
+  "premium",
+  "reimbursement",
+  "new_business",
+  "distribution_channel",
+  "C_H",
+  "C_GI",
+  "C_C"
+)
+
+predictors <- intersect(preferred_predictors, names(df_sev))
+
+all_na_cols <- predictors[vapply(train[predictors], function(x) all(is.na(x)), logical(1))]
+predictors <- setdiff(predictors, all_na_cols)
+
+constant_cols <- predictors[vapply(train[predictors], function(x) {
+  length(unique(stats::na.omit(x))) <= 1
+}, logical(1))]
+predictors <- setdiff(predictors, constant_cols)
+
+aligned <- align_factor_levels(train, test, predictors)
+train <- aligned$train
+test <- aligned$test
+
+model_columns <- c("severity", predictors)
+train_model <- train[complete.cases(train[, model_columns, drop = FALSE]), model_columns, drop = FALSE]
+test_model <- test[complete.cases(test[, model_columns, drop = FALSE]), model_columns, drop = FALSE]
+
+print(nrow(df))
+print(nrow(df_sev))
+print(nrow(train_model))
+print(nrow(test_model))
+print(predictors)
+```
+
+The pipeline keeps the same covariates for both models, so the final comparison is fair. In addition, by aligning the factor levels between train and test we avoid errors on unseen categories.
+
+## Gamma GLM
+
+The first model is a **Gamma GLM with log link**. This is a standard actuarial choice for positive and right-skewed claim severities.
+
+In this case we model:
+
+$$\log(E[\text{Severity}]) = \beta_0 + \beta_1 x_1 + \dots$$
+
+So we do not need an exposure offset here, because the target is already the average cost per service.
+
+```{r}
+gamma_formula <- as.formula(
+  paste("severity ~", paste(predictors, collapse = " + "))
+)
+
+gamma_glm <- glm(
+  formula = gamma_formula,
+  data = train_model,
+  family = Gamma(link = "log")
+)
+
+summary(gamma_glm)
+```
+
+We now evaluate the Gamma GLM on the test set:
+
+```{r}
+pred_gamma_glm <- predict(gamma_glm, newdata = test_model, type = "response")
+actual <- test_model$severity
+
+mae_gamma <- mae(actual, pred_gamma_glm)
+rmse_gamma <- rmse(actual, pred_gamma_glm)
+
+cat("Gamma GLM on test set:\n")
+cat("MAE:", mae_gamma, "\n")
+cat("RMSE:", rmse_gamma, "\n")
+```
+
+```{r}
+calibration_gamma <- calibration_table(actual, pred_gamma_glm, "gamma_glm")
+
+ggplot(calibration_gamma, aes(x = avg_pred, y = avg_actual)) +
+  geom_point(size = 3, color = "darkblue") +
+  geom_abline(linetype = "dashed", color = "red", linewidth = 1) +
+  labs(
+    title = "Gamma GLM - calibration",
+    x = "Average predicted severity",
+    y = "Average observed severity"
+  ) +
+  theme_minimal() +
+  coord_fixed() +
+  xlim(0, max(calibration_gamma$avg_actual, calibration_gamma$avg_pred)) +
+  ylim(0, max(calibration_gamma$avg_actual, calibration_gamma$avg_pred))
+```
+
+In the current run the Gamma GLM gives an MAE of about 28.41 and an RMSE of about 59.62. The calibration plot shows that the model follows the general trend quite well, but in the highest decile it still underestimates the most severe claims.
+
+## Gradient Boosting Machine (GBM)
+
+The second model is a **Gradient Boosting Machine**. As in the frequency section, this model is more flexible because it is non-parametric and can capture non-linear effects and interactions.
+
+Here we do not model the severity directly, but the logarithm of severity:
+
+$$\log(\text{Severity}) = F(x_1, x_2, \dots)$$
+
+Then we transform the predictions back to the original scale using a smearing correction. This is exactly the idea used in the standalone pipeline.
+
+```{r}
+set.seed(42)
+gbm_fit <- fit_gbm_model(train_model, predictors, "severity")
+best_iter <- gbm_fit$best_iter
+
+cat("Best number of trees:", best_iter, "\n")
+cat("Distribution used:", gbm_fit$distribution_used, "\n")
+cat("Smearing factor:", gbm_fit$smearing_factor, "\n")
+
+summary(gbm_fit$model, n.trees = best_iter)
+```
+
+The variable importance plot shows that the geographical variables are the most relevant ones. In particular `C_C` and `C_GI` explain a large part of the severity variation, while variables like `new_business` and `type_policy` have a much smaller impact.
+
+We now evaluate the GBM on the test set:
+
+```{r}
+pred_gbm_lognormal <- gbm_fit$prediction_fun(test_model)
+
+mae_gbm <- mae(actual, pred_gbm_lognormal)
+rmse_gbm <- rmse(actual, pred_gbm_lognormal)
+
+cat("GBM on test set:\n")
+cat("MAE:", mae_gbm, "\n")
+cat("RMSE:", rmse_gbm, "\n")
+```
+
+```{r}
+calibration_gbm <- calibration_table(actual, pred_gbm_lognormal, "gbm_lognormal")
+
+ggplot(calibration_gbm, aes(x = avg_pred, y = avg_actual)) +
+  geom_point(size = 3, color = "darkgreen") +
+  geom_abline(linetype = "dashed", color = "red", linewidth = 1) +
+  labs(
+    title = "GBM Model - calibration",
+    x = "Average predicted severity",
+    y = "Average observed severity"
+  ) +
+  theme_minimal() +
+  coord_fixed() +
+  xlim(0, max(calibration_gbm$avg_actual, calibration_gbm$avg_pred)) +
+  ylim(0, max(calibration_gbm$avg_actual, calibration_gbm$avg_pred))
+```
+
+In the current run the GBM gives an MAE of about 27.93 and an RMSE of about 59.20. So the improvement compared to the Gamma GLM is not extremely large, but it is still slightly better on both metrics.
+
+## Final comparison
+
+Now that we constructed the two models for the severity, we can put in comparison the metrics of both. Below there is a Model Comparison Table:
+
+| Metrics | Gamma GLM | GBM |
+|---------|-----------|-----|
+| MAE | `r round(mae_gamma, 4)` | `r round(mae_gbm, 4)` |
+| RMSE | `r round(rmse_gamma, 4)` | `r round(rmse_gbm, 4)` |
+
+We can also look at the comparison directly from R:
+
+```{r}
+model_comparison <- data.frame(
+  model = c("gamma_glm", "gbm_lognormal"),
+  MAE = c(mae_gamma, mae_gbm),
+  RMSE = c(rmse_gamma, rmse_gbm)
+)
+
+print(model_comparison)
+```
+
+The GBM has slightly better performances on the two metrics that we studied, so for the severity analysis the tree-based model is marginally preferred. At the same time the Gamma GLM remains a very solid benchmark, because it is simpler to interpret and its predictive performance is very close to the GBM one.
+
+
+
+
+We create a new dataset with the three risk profiles:
+```{r}
+riskprofile=data.frame(
+ profile=c('Low Risk', 'Middle Risk', 'High Risk'),
+ age=c(25,25,75), #we have to check the value inside the vector to be sure that we are actually creating the profiles in the right way
+  gender=factor(c("M", "M", "F")),
+  typeproduct=factor(c("S", "S", "P")),
+  CC=factor(c("C4", "C1", "C3")),
+  exposuretime=c(1,1,1)
+)
+print(riskprofile)
+```
+Since we have the various model we can now calculate the risk:
+```{r}
+riskprofile$expectedfreqmodelbest=predict(glm_nb_geo, newdata=riskprofile, type='response')
+riskprofile$expectedsevmodelbest=predict(pred_gbm_lognormal, newdata=riskprofile, type='response')
+riskprofile$purepremium1=riskprofile$expectedfreqmodel1*riskprofile$expectedsevmodelbest
+
+```
+
+We do the same for the other model:
+```{r}
+riskprofile$expectedfreqmodelnotbest=predict(gbm_train, newdata=riskprofile, type='response')
+riskprofile$expectedsevmodelnotbest=predict(pred_gamma_glm, newdata=riskprofile, type='response')
+riskprofile$purepremiumnotbest=riskprofile$expectedfreqmodelnotbest*riskprofile$expectedsevmodelnotbest
+```
+
+We now show the final rounded results:
+```{r}
+riskprofile %>%
+select(profile, expectedfreqmodelbest, expectedsevmodelbest, purepremiumbest, expectedfreqmodel, expectedsevmodelnotbest, purepremiumnotbest) %>%
+mutate_if(is.numeric, round, 2)
+```
+
